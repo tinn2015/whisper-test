@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>实时语音转写</title>
+    <style>
+        body {
+            font-family: 'Microsoft YaHei', sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        #controls {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        #recordButton {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: background-color 0.3s;
+        }
+        #recordButton:hover {
+            background-color: #45a049;
+        }
+        #recordButton.recording {
+            background-color: #f44336;
+        }
+        #status {
+            text-align: center;
+            color: #666;
+            margin: 10px 0;
+        }
+        #transcription {
+            background-color: #fff;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 15px;
+            margin-top: 20px;
+            height: 300px;
+            overflow-y: auto;
+        }
+        .transcription-item {
+            margin-bottom: 10px;
+            padding: 8px;
+            background-color: #f8f9fa;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>实时语音转写</h1>
+        <div id="controls">
+            <button id="recordButton">开始录音</button>
+        </div>
+        <div id="status">等待开始...</div>
+        <div id="transcription"></div>
+    </div>
+
+    <script>
+        let isRecording = false;
+        let mediaRecorder = null;
+        let websocket = null;
+        const recordButton = document.getElementById('recordButton');
+        const statusDiv = document.getElementById('status');
+        const transcriptionDiv = document.getElementById('transcription');
+
+        // 初始化WebSocket连接
+        function initWebSocket() {
+            websocket = new WebSocket('ws://localhost:8765');
+            
+            websocket.onopen = () => {
+                console.log('WebSocket连接已建立');
+                statusDiv.textContent = 'WebSocket连接已建立';
+            };
+
+            websocket.onmessage = (event) => {
+                const transcriptionItem = document.createElement('div');
+                transcriptionItem.className = 'transcription-item';
+                transcriptionItem.textContent = event.data;
+                transcriptionDiv.appendChild(transcriptionItem);
+                transcriptionDiv.scrollTop = transcriptionDiv.scrollHeight;
+            };
+
+            websocket.onclose = () => {
+                console.log('WebSocket连接已关闭');
+                statusDiv.textContent = 'WebSocket连接已关闭';
+            };
+
+            websocket.onerror = (error) => {
+                console.error('WebSocket错误:', error);
+                statusDiv.textContent = 'WebSocket连接错误';
+            };
+        }
+
+        // 开始录音
+        async function startRecording() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                // 检查浏览器支持的音频格式
+                const mimeTypes = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus'];
+                let selectedMimeType = '';
+                
+                for (const mimeType of mimeTypes) {
+                    if (MediaRecorder.isTypeSupported(mimeType)) {
+                        selectedMimeType = mimeType;
+                        break;
+                    }
+                }
+                
+                if (!selectedMimeType) {
+                    throw new Error('浏览器不支持任何可用的音频格式');
+                }
+                
+                mediaRecorder = new MediaRecorder(stream, { mimeType: selectedMimeType });
+                
+                const audioContext = new AudioContext();
+                mediaRecorder.ondataavailable = async (event) => {
+                    if (event.data.size > 0 && websocket && websocket.readyState === WebSocket.OPEN) {
+                        try {
+                            // 获取音频数据
+                            const arrayBuffer = await event.data.arrayBuffer();
+                            console.log('原始音频数据大小:', arrayBuffer.byteLength);
+                            
+                            // 确保数据长度是采样点大小的整数倍
+                            // const bytesPerSample = 2; // 16位音频，每个采样点2字节
+                            // const validLength = Math.floor(arrayBuffer.byteLength / bytesPerSample) * bytesPerSample;
+                            // const trimmedBuffer = arrayBuffer.slice(0, validLength);
+                            
+                            // 解码音频数据
+                            // const audioBuffer = await audioContext.decodeAudioData(trimmedBuffer);
+                            // console.log('音频解码成功:', {
+                            //     sampleRate: audioBuffer.sampleRate,
+                            //     numberOfChannels: audioBuffer.numberOfChannels,
+                            //     length: audioBuffer.length
+                            // });
+                            
+                            // 发送处理后的音频数据
+                            await websocket.send(arrayBuffer);
+                        } catch (error) {
+                            console.error('处理音频数据时出错:', error);
+                            audioContext.close();
+                            console.error('音频处理错误:', error);
+                            statusDiv.textContent = `音频处理错误: ${error.message}`;
+                        }
+                    }
+                };
+
+                // 将AudioBuffer转换为WAV格式的函数
+                function audioBufferToWav(buffer) {
+                    const numOfChan = buffer.numberOfChannels;
+                    const length = buffer.length * numOfChan * 2;
+                    const buffer32 = new Float32Array(buffer.length * numOfChan);
+                    const view = new DataView(new ArrayBuffer(44 + length));
+
+                    // WAV文件头
+                    writeString(view, 0, 'RIFF');
+                    view.setUint32(4, 36 + length, true);
+                    writeString(view, 8, 'WAVE');
+                    writeString(view, 12, 'fmt ');
+                    view.setUint32(16, 16, true);
+                    view.setUint16(20, 1, true);
+                    view.setUint16(22, numOfChan, true);
+                    view.setUint32(24, buffer.sampleRate, true);
+                    view.setUint32(28, buffer.sampleRate * 2 * numOfChan, true);
+                    view.setUint16(32, numOfChan * 2, true);
+                    view.setUint16(34, 16, true);
+                    writeString(view, 36, 'data');
+                    view.setUint32(40, length, true);
+
+                    // 写入音频数据
+                    let offset = 44;
+                    for (let i = 0; i < buffer.length; i++) {
+                        for (let channel = 0; channel < numOfChan; channel++) {
+                            const sample = buffer.getChannelData(channel)[i];
+                            view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
+                            offset += 2;
+                        }
+                    }
+
+                    return new Blob([view], { type: 'audio/wav' });
+                }
+
+                function writeString(view, offset, string) {
+                    for (let i = 0; i < string.length; i++) {
+                        view.setUint8(offset + i, string.charCodeAt(i));
+                    }
+                }
+
+                mediaRecorder.start(5000); // 每秒发送一次数据
+                isRecording = true;
+                recordButton.textContent = '停止录音';
+                recordButton.classList.add('recording');
+                statusDiv.textContent = '正在录音...';
+            } catch (error) {
+                console.error('获取麦克风失败:', error);
+                statusDiv.textContent = '获取麦克风失败';
+            }
+        }
+
+        // 停止录音
+        function stopRecording() {
+            if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                mediaRecorder.stop();
+                mediaRecorder.stream.getTracks().forEach(track => track.stop());
+                isRecording = false;
+                recordButton.textContent = '开始录音';
+                recordButton.classList.remove('recording');
+                statusDiv.textContent = '录音已停止';
+            }
+        }
+
+        // 按钮点击事件处理
+        recordButton.addEventListener('click', () => {
+            if (!isRecording) {
+                if (!websocket || websocket.readyState !== WebSocket.OPEN) {
+                    initWebSocket();
+                }
+                startRecording();
+            } else {
+                stopRecording();
+            }
+        });
+
+        // 页面加载时初始化WebSocket连接
+        initWebSocket();
+
+        // 页面关闭时清理资源
+        window.addEventListener('beforeunload', () => {
+            if (isRecording) {
+                stopRecording();
+            }
+            if (websocket) {
+                websocket.close();
+            }
+        });
+    </script>
+</body>
+</html>
