@@ -74,7 +74,7 @@
         <div id="status">等待开始...</div>
         <div id="transcription"></div>
     </div>
-
+    <script src="./recorder.mp3.min.js"></script>
     <script>
         let isRecording = false;
         let mediaRecorder = null;
@@ -112,120 +112,123 @@
         }
 
         // 开始录音
+        var rec = null
         async function startRecording() {
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                // 检查浏览器支持的音频格式
-                const mimeTypes = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus'];
-                let selectedMimeType = '';
-                
-                for (const mimeType of mimeTypes) {
-                    if (MediaRecorder.isTypeSupported(mimeType)) {
-                        selectedMimeType = mimeType;
-                        break;
-                    }
+            console.log('开始录音Recoder', Recorder);
+            let sendChunk = null //SampleData需要的上次转换结果，用于连续转换采样率
+            const testSampleRate = 16000 //测试用采样率
+            const pcmData = [] //pcm数据
+            rec = Recorder({ //本配置参数请参考下面的文档，有详细介绍
+                type:"mp3",sampleRate:16000,bitRate:16, //mp3格式，指定采样率hz、比特率kbps，其他参数使用默认配置；注意：是数字的参数必须提供数字，不要用字符串；需要使用的type类型，需提前把格式支持文件加载进来，比如使用wav格式需要提前加载wav.js编码引擎
+                onProcess:function(buffers,powerLevel,bufferDuration,bufferSampleRate,newBufferIdx,asyncEnd){
+                    //录音实时回调，大约1秒调用12次本回调，buffers为开始到现在的所有录音pcm数据块(16位小端LE)
+                    //可利用extensions/sonic.js插件实时变速变调，此插件计算量巨大，onProcess需要返回true开启异步模式
+                    //可实时上传（发送）数据，配合Recorder.SampleData方法，将buffers中的新数据连续的转换成pcm上传，或使用mock方法将新数据连续的转码成其他格式上传，可以参考文档里面的：Demo片段列表 -> 实时转码并上传-通用版；基于本功能可以做到：实时转发数据、实时保存数据、实时语音识别（ASR）等
+                    // console.log('onProcess',buffers,buffers.length,powerLevel,bufferDuration,bufferSampleRate,newBufferIdx);
+                    const chunk = Recorder.SampleData(buffers, bufferSampleRate, testSampleRate, sendChunk);//转换数据为pcm
+                    sendChunk = chunk
+                    pcm = chunk.data
+                    storeBuffer.addPcmData(pcm)
                 }
+            });
+            rec.open(function(){//打开麦克风授权获得相关资源
+                rec.start();//开始录音
+            },function(msg,isUserNotAllow){//用户拒绝未授权或不支持
+                console.log((isUserNotAllow?"UserNotAllow，":"")+"无法录音:"+msg);
+            });
+            isRecording = true;
+            recordButton.textContent = '停止录音';
+            recordButton.classList.add('recording');
+            statusDiv.textContent = '正在录音...';
+        }
+
+    const storeBuffer = {
+        sendPcmBuffer: new Int16Array(0),
+        // 每次发送指定二进制数据长度的数据帧，单位字节，16位pcm取值必须为2的整数倍。
+        sendFrameSize: 80000,
+        // 16位，16位16khz的pcm 1秒有：16000hz*16位/8比特=32000字节的数据，默认配置3200字节每秒发送大约10次
+        testBitRate: 16,
+        pcmBuffer: new Int16Array(0),
+        // init: function() {
+        //     this.sendPcmBuffer = new Int16Array(0);
+        //     //循环切分出固定长度的数据帧
+        //     const chunkSize=this.SendFrameSize/(this.testBitRate/8);
+           
+        //     console.log('pcmBuffer', this.pcmBuffer.length, this.pcmBuffer);
+        //     if(this.pcmBuffer.length>=chunkSize){
+        //         var frame=new Int16Array(this.pcmBuffer.subarray(0,chunkSize));
+        //         pcmBuffer=new Int16Array(this.pcmBuffer.subarray(chunkSize));
                 
-                if (!selectedMimeType) {
-                    throw new Error('浏览器不支持任何可用的音频格式');
-                }
+        //         // var closeVal=false;
+        //         // if(isClose && this.pcmBuffer.length==0){
+        //         //     closeVal=true; //已关闭录音，且没有剩余要发送的数据了
+        //         // }
+        //         websocket.send(frame);
+        //         this.sendPcmBuffer = pcmBuffer;
+        //     } 
+        // },
+        addPcmData: function(pcm) {
+            var pcmBuffer=this.sendPcmBuffer;
+            var tmp=new Int16Array(pcmBuffer.length+pcm.length);
+	        tmp.set(pcmBuffer,0);
+	        tmp.set(pcm,pcmBuffer.length);
+	        pcmBuffer=tmp;
+            // this.pcmBuffer = pcmBuffer;
+            //循环切分出固定长度的数据帧
+            const chunkSize=this.sendFrameSize/(this.testBitRate/8);
+            console.log('pcmBuffer', pcmBuffer.length, chunkSize,pcmBuffer);
+            if(pcmBuffer.length>=chunkSize){
+                var frame=new Int16Array(pcmBuffer.subarray(0,chunkSize));
+                pcmBuffer=new Int16Array(pcmBuffer.subarray(chunkSize));
                 
-                mediaRecorder = new MediaRecorder(stream, { mimeType: selectedMimeType });
-                
-                const audioContext = new AudioContext();
-                mediaRecorder.ondataavailable = async (event) => {
-                    if (event.data.size > 0 && websocket && websocket.readyState === WebSocket.OPEN) {
-                        try {
-                            // 获取音频数据
-                            const arrayBuffer = await event.data.arrayBuffer();
-                            console.log('原始音频数据大小:', arrayBuffer.byteLength);
-                            
-                            // 确保数据长度是采样点大小的整数倍
-                            // const bytesPerSample = 2; // 16位音频，每个采样点2字节
-                            // const validLength = Math.floor(arrayBuffer.byteLength / bytesPerSample) * bytesPerSample;
-                            // const trimmedBuffer = arrayBuffer.slice(0, validLength);
-                            
-                            // 解码音频数据
-                            // const audioBuffer = await audioContext.decodeAudioData(trimmedBuffer);
-                            // console.log('音频解码成功:', {
-                            //     sampleRate: audioBuffer.sampleRate,
-                            //     numberOfChannels: audioBuffer.numberOfChannels,
-                            //     length: audioBuffer.length
-                            // });
-                            
-                            // 发送处理后的音频数据
-                            await websocket.send(arrayBuffer);
-                        } catch (error) {
-                            console.error('处理音频数据时出错:', error);
-                            audioContext.close();
-                            console.error('音频处理错误:', error);
-                            statusDiv.textContent = `音频处理错误: ${error.message}`;
-                        }
-                    }
-                };
+                // var closeVal=false;
+                // if(isClose && this.pcmBuffer.length==0){
+                //     closeVal=true; //已关闭录音，且没有剩余要发送的数据了
+                // }
+                websocket.send(frame);
+            }
+            this.sendPcmBuffer = pcmBuffer;
+        },
+    }
 
-                // 将AudioBuffer转换为WAV格式的函数
-                function audioBufferToWav(buffer) {
-                    const numOfChan = buffer.numberOfChannels;
-                    const length = buffer.length * numOfChan * 2;
-                    const buffer32 = new Float32Array(buffer.length * numOfChan);
-                    const view = new DataView(new ArrayBuffer(44 + length));
-
-                    // WAV文件头
-                    writeString(view, 0, 'RIFF');
-                    view.setUint32(4, 36 + length, true);
-                    writeString(view, 8, 'WAVE');
-                    writeString(view, 12, 'fmt ');
-                    view.setUint32(16, 16, true);
-                    view.setUint16(20, 1, true);
-                    view.setUint16(22, numOfChan, true);
-                    view.setUint32(24, buffer.sampleRate, true);
-                    view.setUint32(28, buffer.sampleRate * 2 * numOfChan, true);
-                    view.setUint16(32, numOfChan * 2, true);
-                    view.setUint16(34, 16, true);
-                    writeString(view, 36, 'data');
-                    view.setUint32(40, length, true);
-
-                    // 写入音频数据
-                    let offset = 44;
-                    for (let i = 0; i < buffer.length; i++) {
-                        for (let channel = 0; channel < numOfChan; channel++) {
-                            const sample = buffer.getChannelData(channel)[i];
-                            view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
-                            offset += 2;
-                        }
-                    }
-
-                    return new Blob([view], { type: 'audio/wav' });
-                }
-
-                function writeString(view, offset, string) {
-                    for (let i = 0; i < string.length; i++) {
-                        view.setUint8(offset + i, string.charCodeAt(i));
-                    }
-                }
-
-                mediaRecorder.start(5000); // 每秒发送一次数据
-                isRecording = true;
-                recordButton.textContent = '停止录音';
-                recordButton.classList.add('recording');
-                statusDiv.textContent = '正在录音...';
-            } catch (error) {
-                console.error('获取麦克风失败:', error);
-                statusDiv.textContent = '获取麦克风失败';
+        function downloadRecording(Blob) {
+            if (Blob) {
+                const url = URL.createObjectURL(Blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `recording_${new Date().toISOString()}.webm`;
+                a.click();
+                URL.revokeObjectURL(url);
             }
         }
 
         // 停止录音
         function stopRecording() {
-            if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-                mediaRecorder.stop();
-                mediaRecorder.stream.getTracks().forEach(track => track.stop());
-                isRecording = false;
-                recordButton.textContent = '开始录音';
-                recordButton.classList.remove('recording');
-                statusDiv.textContent = '录音已停止';
-            }
+            rec.stop(function(blob,duration){
+                //简单利用URL生成本地文件地址，注意不用了时需要revokeObjectURL，否则霸占内存
+                //此地址只能本地使用，比如赋值给audio.src进行播放，赋值给a.href然后a.click()进行下载（a需提供download="xxx.mp3"属性）
+                var localUrl=(window.URL||webkitURL).createObjectURL(blob);
+                console.log(blob,localUrl,"时长:"+duration+"ms");
+                rec.close();//释放录音资源，当然可以不释放，后面可以连续调用start；但不释放时系统或浏览器会一直提示在录音，最佳操作是录完就close掉
+                rec=null;
+                
+                //已经拿到blob文件对象想干嘛就干嘛：立即播放、上传、下载保存
+                
+                /*** 【立即播放例子】 ***/
+                // var audio=document.createElement("audio");
+                // document.body.prepend(audio);
+                // audio.controls=true;
+                // audio.src=localUrl;
+                // audio.play();
+            },function(msg){
+                console.log("录音失败:"+msg);
+                rec.close();//可以通过stop方法的第3个参数来自动调用close
+                rec=null;
+            });
+            isRecording = false;
+            recordButton.textContent = '开始录音';
+            recordButton.classList.remove('recording');
+            statusDiv.textContent = '录音已停止';
         }
 
         // 按钮点击事件处理
